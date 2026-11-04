@@ -138,7 +138,11 @@ public final class DecisionModelAction {
                     recordTokenMetrics(resourceMetrics, outcome.response);
                     terminal =
                             DecisionResponseEvent.success(
-                                    request.getId(), outcome.response, retryCount, totalWaitSec);
+                                            request.getId(),
+                                            outcome.response,
+                                            retryCount,
+                                            totalWaitSec)
+                                    .withContext(request.getContext());
                     break;
                 }
 
@@ -153,7 +157,11 @@ public final class DecisionModelAction {
                 if (retryCount == maxRetries) {
                     terminal =
                             DecisionResponseEvent.failed(
-                                    request.getId(), outcome.error, retryCount, totalWaitSec);
+                                            request.getId(),
+                                            outcome.error,
+                                            retryCount,
+                                            totalWaitSec)
+                                    .withContext(request.getContext());
                     break;
                 }
                 int waitSec = waitInterval * (1 << retryCount);

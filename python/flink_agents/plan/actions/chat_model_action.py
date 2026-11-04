@@ -191,7 +191,12 @@ async def _durable_invoke(
     return ctx.durable_execute(func, *args, **kwargs)
 
 
-def _send_failure(request_id: UUID, error: Exception, ctx: RunnerContext) -> None:
+def _send_failure(
+    request_id: UUID,
+    error: Exception,
+    ctx: RunnerContext,
+    context: Any | None = None,
+) -> None:
     stats = _get_retry_stats(ctx.sensory_memory, request_id)
     _clear_request_context(ctx.sensory_memory, request_id)
     ctx.send_event(
@@ -200,6 +205,7 @@ def _send_failure(request_id: UUID, error: Exception, ctx: RunnerContext) -> Non
             _error_text(error),
             stats["total_retry_count"],
             stats["total_retry_wait_sec"],
+            context=context,
         )
     )
 
@@ -261,10 +267,11 @@ def _save_tool_request_event_context(
     model: str,
     prompt_args: Dict | None,
     output_schema: OutputSchema | None,
+    context: Any | None = None,
 ) -> None:
     """Save the context for a specific tool request event."""
-    context = sensory_memory.get(_TOOL_REQUEST_EVENT_CONTEXT) or {}
-    context[str(tool_request_event_id)] = {
+    stored = sensory_memory.get(_TOOL_REQUEST_EVENT_CONTEXT) or {}
+    entry = {
         "initial_request_id": str(initial_request_id),
         "model": model,
         _PROMPT_ARGS: prompt_args if prompt_args is not None else {},
@@ -272,7 +279,12 @@ def _save_tool_request_event_context(
         if output_schema is not None
         else None,
     }
-    sensory_memory.set(_TOOL_REQUEST_EVENT_CONTEXT, context)
+    # Same attribute name as the event field. Absent when the request omitted it,
+    # so a checkpoint from before this field still resumes with no user context.
+    if context is not None:
+        entry["context"] = context
+    stored[str(tool_request_event_id)] = entry
+    sensory_memory.set(_TOOL_REQUEST_EVENT_CONTEXT, stored)
 
 
 def _get_tool_request_event_context(
@@ -393,6 +405,7 @@ def _handle_tool_calls(
     prompt_args: Dict | None,
     output_schema: OutputSchema | None,
     ctx: RunnerContext,
+    context: Any | None = None,
 ) -> None:
     """Handle tool calls in chat response."""
     _update_tool_call_context(
@@ -415,6 +428,7 @@ def _handle_tool_calls(
         model,
         prompt_args,
         output_schema,
+        context,
     )
 
     ctx.send_event(tool_request_event)
@@ -564,6 +578,8 @@ async def chat(
     prompt_args: Dict | None,
     output_schema: OutputSchema | None,
     ctx: RunnerContext,
+    *,
+    context: Any | None = None,
 ) -> None:
     """Chat with llm.
 
@@ -584,7 +600,7 @@ async def chat(
     except (CancelledError, InterruptedError):
         raise
     except Exception as error:
-        _send_failure(initial_request_id, error, ctx)
+        _send_failure(initial_request_id, error, ctx, context)
         return
 
     # Evaluated once: the answer depends only on the chat model and the schema, and
@@ -600,7 +616,7 @@ async def chat(
         except (CancelledError, InterruptedError):
             raise
         except Exception as error:
-            _send_failure(initial_request_id, error, ctx)
+            _send_failure(initial_request_id, error, ctx, context)
             return
 
     request_metric_group = ctx.action_metric_group
@@ -741,7 +757,7 @@ async def chat(
         )
 
     if final_error is not None:
-        _send_failure(initial_request_id, final_error, ctx)
+        _send_failure(initial_request_id, final_error, ctx, context)
         return
 
     if (
@@ -756,6 +772,7 @@ async def chat(
             prompt_args,
             output_schema,
             ctx,
+            context,
         )
     else:  # if there is no tool call generated, return chat response directly
         retry_stats = _get_retry_stats(ctx.sensory_memory, initial_request_id)
@@ -767,6 +784,7 @@ async def chat(
             response=response,
             retry_count=total_retry_count,
             total_retry_wait_sec=total_retry_wait_sec,
+            context=context,
         )
         completed.attributes["structured_output"] = structured_output
         ctx.send_event(completed)
@@ -781,6 +799,7 @@ async def _process_chat_request(event: ChatRequestEvent, ctx: RunnerContext) -> 
         prompt_args=event.prompt_args,
         output_schema=event.output_schema,
         ctx=ctx,
+        context=event.context,
     )
 
 
@@ -813,6 +832,7 @@ async def _process_tool_response(event: ToolResponseEvent, ctx: RunnerContext) -
         prompt_args=tool_request_event_context.get(_PROMPT_ARGS, {}),
         output_schema=tool_request_event_context["output_schema"],
         ctx=ctx,
+        context=tool_request_event_context.get("context"),
     )
 
 
